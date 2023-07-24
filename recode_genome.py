@@ -17,6 +17,8 @@ from Bio.SeqRecord import SeqRecord
 from dnachisel import DnaOptimizationProblem, AvoidPattern, EnforceTranslation, Location
 from Bio.Restriction import *
 import re
+from tqdm import tqdm
+
 
 # Load the CUTG csv file into a DataFrame
 df = pd.read_csv('dbs/dna_codon_usage.csv')
@@ -105,7 +107,7 @@ def recode_codons(record, target_codons, restriction_sites, relative_usage):
     CDS_locations = get_CDS_locations(record)
 
     # Process each gene part
-    for gene_part in CDS_locations:
+    for gene_part in tqdm(CDS_locations, desc='Recoding codons', unit='CDS'):
         start, end = int(gene_part.start), int(gene_part.end)
         
         # Iterate over the gene part in codon-sized chunks
@@ -159,7 +161,7 @@ def recode_restriction_sites(record, restriction_sites):
     CDS_locations = get_CDS_locations(record)
     restriction_sites = list(restriction_sites)
 
-    for enzyme_name in restriction_sites:
+    for enzyme_name in tqdm(restriction_sites, desc='Removing restriction sites', unit='site'):
         # Get the recognition sequence for the enzyme
         enzyme = RestrictionBatch([enzyme_name])
         site = list(enzyme)[0].site
@@ -211,16 +213,29 @@ def recode_restriction_sites(record, restriction_sites):
     return optimized_record
 
 
-def write_to_genbank(record, filename):
-    SeqIO.write([record], filename, "genbank")
+def write_to_genbank(record, output_path, codons, restriction_sites):
+    record.id = "recoded_" + record.id
+    
+    description = record.description
+    if codons:
+        description += f" (this organism has been recoded to remove {' '.join(codons)} codons"
+        if restriction_sites:
+            description += " and"
+    if restriction_sites:
+        description += f" {' '.join(restriction_sites)} restriction enzyme recognition sites"
+    description += f" from the genome of {record.annotations.get('source', '')})"
+    
+    record.description = description
+    SeqIO.write(record, output_path, "genbank")
+
 
 def main():
     parser = argparse.ArgumentParser(description='Recode a phage genome by removing specified codons and restriction sites via synonymous mutations.')
-    parser.add_argument('-i','--input', type=str, required=True, help='Input GenBank file name.')
-    parser.add_argument('-o','--output', type=str, required=True, help='Output GenBank file name.')
+    parser.add_argument('-i','--input', type=str, required=True, help='Input GenBank file name. Specify as path name if input file is not in the same directory as recode_genome.py')
+    parser.add_argument('-o','--output', type=str, required=True, help='Output GenBank file name. Specify as path name to specify output directory')
     parser.add_argument('-s','--species', type=str, help='Species name for codon usage bias.')
-    parser.add_argument('-c','--codons', type=str, nargs='+', help='Codons to recode.')
-    parser.add_argument('-re','--re_sites', type=str, nargs='+', help='Restriction enzyme recognition sites to recode.')
+    parser.add_argument('-c','--codons', type=str, nargs='+', help='Space separated list of codons to recode. e.g. TCA TCG')
+    parser.add_argument('-re','--re_sites', type=str, nargs='+', help='Space separated list of restriction enzyme recognition sites to recode. e.g. BsaI BsmbI')
     args = parser.parse_args()
 
     record = SeqIO.read(args.input, "genbank")
@@ -236,7 +251,7 @@ def main():
         record = recode_codons(record, args.codons, restriction_sites, relative_usage)
         
 
-    write_to_genbank(record, args.output)
+    write_to_genbank(record, args.output, args.codons, restriction_sites)
 
 if __name__ == "__main__":
     main()
