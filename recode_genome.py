@@ -97,11 +97,33 @@ def compute_possible_codons(codon_table, aa, target_codons):
     
     return possible_codons
 
+def find_overlapping_regions(record):
+    """Find regions in the genome where two or more CDS overlap."""
+    CDS_locations = get_CDS_locations(record)
+
+    overlaps = set()
+    for i in range(len(CDS_locations)):
+        for j in range(i + 1, len(CDS_locations)):
+            if (CDS_locations[i].end > CDS_locations[j].start and
+                CDS_locations[i].start < CDS_locations[j].end):
+                # The overlapping region is from the start of the next CDS to the end of the current CDS
+                overlap_start = max(CDS_locations[i].start, CDS_locations[j].start)
+                overlap_end = min(CDS_locations[i].end, CDS_locations[j].end)
+                # If the overlapping regions are not in the same reading frame
+                if overlap_start % 3 != CDS_locations[i].start % 3:
+                    overlaps.add((overlap_start, overlap_end))
+
+    return overlaps
+
+
 def recode_codons(record, target_codons, restriction_sites, relative_usage):
     """Recode the codons in a DNA sequence"""
     
     recoded_seq = MutableSeq(record.seq)  # MutableSeq object
     codon_table = Bio.Data.CodonTable.standard_dna_table
+    
+    # Find overlapping regions
+    overlaps = find_overlapping_regions(record)
 
     # Get CDS locations
     CDS_locations = get_CDS_locations(record)
@@ -112,6 +134,11 @@ def recode_codons(record, target_codons, restriction_sites, relative_usage):
         
         # Iterate over the gene part in codon-sized chunks
         for i in range(start, end, 3):
+            
+            # If the codon is in an overlapping region, skip it
+            if any(overlap_start <= i < overlap_end for overlap_start, overlap_end in overlaps):
+                continue
+            
             codon = recoded_seq[i:i+3]
             
             # If the codon is a target, attempt to replace it
@@ -160,6 +187,9 @@ def recode_restriction_sites(record, restriction_sites):
     sequence = str(record.seq)
     CDS_locations = get_CDS_locations(record)
     restriction_sites = list(restriction_sites)
+    
+    # Find overlapping regions
+    overlaps = find_overlapping_regions(record)
 
     for enzyme_name in tqdm(restriction_sites, desc='Removing restriction sites', unit='site'):
         # Get the recognition sequence for the enzyme
@@ -173,6 +203,10 @@ def recode_restriction_sites(record, restriction_sites):
 
 
         for loc in site_locations:
+            # If the restriction site is in an overlapping region, skip it
+            if any(overlap_start <= i < overlap_end for overlap_start, overlap_end in overlaps):
+                continue
+            
             # Check if the restriction site is in a CDS
             in_cds = any(location.start <= loc <= location.end for location in CDS_locations)
             site_end = loc + len(site)
@@ -227,7 +261,35 @@ def write_to_genbank(record, output_path, codons, restriction_sites):
     
     record.description = description
     SeqIO.write(record, output_path, "genbank")
+    
 
+def check_translations(ref_record, new_record):
+    """Check that the translations of the CDS in the old and new records are identical."""
+    # Initialize a list to store results
+    discrepancies = {}
+    reference = SeqIO.read(ref_record, "genbank")
+
+    # Iterate over the features in the old and new records
+    for old_feature, new_feature in zip(reference.features, new_record.features):
+        # Only consider features that are CDS
+        if old_feature.type == 'CDS' and new_feature.type == 'CDS':
+            old_seq = old_feature.extract(reference.seq)
+            new_seq = new_feature.extract(new_record.seq)
+            
+            # Translate the sequences
+            old_protein = old_seq.translate(to_stop=True)
+            new_protein = new_seq.translate(to_stop=True)
+            
+            # Check if the translations are the same
+            if old_protein != new_protein:
+                protein_name = new_feature.qualifiers.get("note")[0]
+                discrepancies[protein_name] = {}
+                for idx, (ref_aa, query_aa) in enumerate(zip(old_protein, new_protein)):
+                    if ref_aa != query_aa:
+                        discrepancies[protein_name][idx + 1] = [ref_aa, query_aa]
+
+                         
+    return discrepancies
 
 def main():
     parser = argparse.ArgumentParser(description='Recode a phage genome by removing specified codons and restriction sites via synonymous mutations.')
@@ -241,17 +303,29 @@ def main():
     record = SeqIO.read(args.input, "genbank")
     codon_usage = get_codon_usage(args.species)
     restriction_sites = args.re_sites if args.re_sites else []
+    overlaps = find_overlapping_regions(record)
 
 
     if args.re_sites:
         record = recode_restriction_sites(record, restriction_sites)
+        proteome_QC = check_translations(args.input, record)
 
     if args.codons:
         relative_usage = compute_relative_codon_usage(codon_usage, Bio.Data.CodonTable.standard_dna_table, args.codons)
         record = recode_codons(record, args.codons, restriction_sites, relative_usage)
-        
+        proteome_QC = check_translations(args.input, record)
 
+        
     write_to_genbank(record, args.output, args.codons, restriction_sites)
+
+    if proteome_QC:
+        print("Discrepancies found in the following locations:")
+        for protein_name, mutation_info in proteome_QC.items():
+            print(f"Protein: {protein_name}")
+            for location, (old_aa, new_aa) in mutation_info.items():
+                print(f"Location: {location}, Old Amino Acid: {old_aa}, New Amino Acid: {new_aa}")
+    else:
+        print("No discrepancies found.")
 
 if __name__ == "__main__":
     main()
