@@ -26,21 +26,23 @@ This script requires the following Python libraries:
 
 Either:
 
-'pip install biopython dnachisel numpy pandas tqdm'
+`pip install biopython dnachisel numpy pandas tqdm`
 
-Or: 'conda install -c conda-forge biopython dnachisel numpy pandas tqdm'
+Or: 
+
+`conda install -c conda-forge biopython dnachisel numpy pandas tqdm`
 
 2. Clone the repository to your local machine.
 
-'git clone https://github.com/petevoor/genome_recoder.git'
+`git clone https://github.com/petevoor/genome_recoder.git`
 
 3. Navigate to the directory containing the script.
 
-'cd directory_name'
+`cd <directory_name>`
 
 4. Run the script with necessary arguments.
 
-'python recode_genome.py -i input_file.gb -o output_file.gb -s species_name -c codon1 codon2 -re enzyme1 enzyme2'
+`python recode_genome.py -i <input_file.gb> -o <output_file.gb> -s <"species_name"> -c codon1 codon2 -re <"enzyme1" "enzyme2">`
 
 ### Arguments
 
