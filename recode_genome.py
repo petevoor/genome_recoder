@@ -18,10 +18,15 @@ from dnachisel import DnaOptimizationProblem, AvoidPattern, EnforceTranslation, 
 from Bio.Restriction import *
 import re
 from tqdm import tqdm
+from datetime import date
+import os
+
 
 
 # Load the CUTG csv file into a DataFrame
 df = pd.read_csv('dbs/dna_codon_usage.csv')
+
+recoded_sites_codons = []
 
 def get_codon_usage(species):
     # Query the DataFrame for the given species
@@ -116,6 +121,23 @@ def find_overlapping_regions(record):
     return overlaps
 
 
+def would_create_restriction_site(seq, i, replacement, restriction_sites):
+    """Check if replacing a codon would create a restriction site"""
+    
+    # Replace codon and extract surrounding sequence
+    temp_seq = seq[:i] + replacement + seq[i+3:]
+    context = temp_seq[max(0, i-20):i+23]  # adjusted to 20-bp context
+
+    # Search for restriction sites in the context
+    for enzyme_name in restriction_sites:
+        # Get the recognition sequence for the enzyme
+        enzyme = RestrictionBatch([enzyme_name])
+        site = list(enzyme)[0].site
+        if site in context or str(Seq(site).reverse_complement()) in context:
+            return True
+    return False
+
+
 def recode_codons(record, target_codons, restriction_sites, relative_usage):
     """Recode the codons in a DNA sequence"""
     
@@ -155,8 +177,10 @@ def recode_codons(record, target_codons, restriction_sites, relative_usage):
                 
                 # Try synonymous codons based on codon usage bias
                 for replacement in np.random.choice(possible_codons, size=60*len(possible_codons), p=weights):
+
                     if not would_create_restriction_site(recoded_seq, i, replacement, restriction_sites):
                         recoded_seq[i:i+3] = replacement
+                        recoded_sites_codons.append((i, str(codon), replacement))
                         break
 
 
@@ -165,21 +189,6 @@ def recode_codons(record, target_codons, restriction_sites, relative_usage):
                                description=record.description, annotations=record.annotations)
     recoded_record.features = record.features
     return recoded_record
-
-
-
-def would_create_restriction_site(seq, i, replacement, restriction_sites):
-    """Check if replacing a codon would create a restriction site"""
-    
-    # Replace codon and extract surrounding sequence
-    temp_seq = seq[:i] + replacement + seq[i+3:]
-    context = temp_seq[max(0, i-20):i+23]  # adjusted to 20-bp context
-    
-    # Search for restriction sites in the context
-    for site in restriction_sites:
-        if site in context:
-            return True
-    return False
 
 
 def recode_restriction_sites(record, restriction_sites):
@@ -204,7 +213,8 @@ def recode_restriction_sites(record, restriction_sites):
 
         for loc in site_locations:
             # If the restriction site is in an overlapping region, skip it
-            if any(overlap_start <= i < overlap_end for overlap_start, overlap_end in overlaps):
+            if any(overlap_start <= loc < overlap_end for overlap_start, overlap_end in overlaps):
+
                 continue
             
             # Check if the restriction site is in a CDS
@@ -212,14 +222,10 @@ def recode_restriction_sites(record, restriction_sites):
             site_end = loc + len(site)
 
             if not in_cds:
-                # If the restriction site is not in a CDS, just optimize the site
-                problem = DnaOptimizationProblem(
-                    sequence=sequence,
-                    constraints=[AvoidPattern(site, location=Location(loc, site_end))],
-                    logger=None
-                )
+                continue
 
-            elif sum(location.start <= loc <= location.end for location in CDS_locations) == 1:
+            elif any(location.start <= loc <= location.end for location in CDS_locations):
+
                 # If the restriction site is in exactly one CDS, optimize the site and enough surrounding bases to maintain the reading frame
                 cds_location = [location for location in CDS_locations if location.start <= loc <= location.end][0]
                 optimization_start = loc - (loc - cds_location.start) % 3
@@ -235,8 +241,10 @@ def recode_restriction_sites(record, restriction_sites):
             try:
                 problem.resolve_constraints()
                 sequence = str(problem.to_record(with_sequence_edits=True).seq)
+                recoded_sites_codons.append((loc, site, sequence[loc:loc+len(site)]))
             except Exception as e:
                 print(f"Could not optimize restriction site at location {loc}. Error: {e}")
+
 
 
     # Create a new SeqRecord with the optimized sequence and original metadata
@@ -291,6 +299,101 @@ def check_translations(ref_record, new_record):
                          
     return discrepancies
 
+def find_unrecoded_restriction_sites(new_record, restriction_sites):
+    new_sequence = str(new_record.seq)
+    unrecoded_restriction_sites = []
+    
+    for enzyme_name in restriction_sites:
+        enzyme = RestrictionBatch([enzyme_name])
+        site = list(enzyme)[0].site
+        new_site_locations_fwd = [match.start() for match in re.finditer(site, new_sequence)]
+        new_site_locations_rev = [match.start() for match in re.finditer(str(Seq(site).reverse_complement()), new_sequence)]
+        new_site_locations = new_site_locations_fwd + new_site_locations_rev
+        
+        for loc in new_site_locations:
+            unrecoded_restriction_sites.append((loc, site))
+    
+    return unrecoded_restriction_sites
+
+
+def find_unrecoded_codons(ref_record, new_record, target_codons):
+    reference = SeqIO.read(ref_record, "genbank")
+    original_sequence = str(reference.seq)
+    new_sequence = str(new_record.seq)
+    unrecoded_codons = []
+    
+    # Get CDS locations
+    CDS_locations = get_CDS_locations(reference)
+
+    # Process each gene part
+    for gene_part in CDS_locations:
+        start, end = int(gene_part.start), int(gene_part.end)
+        
+        # Iterate over the gene part in codon-sized chunks
+        for i in range(start, end, 3):
+            original_codon = original_sequence[i:i+3]
+            new_codon = new_sequence[i:i+3]
+            
+            # If the codon was a target and it is the same in the new sequence, it was not recoded
+            if original_codon in target_codons and original_codon == new_codon:
+                unrecoded_codons.append((i, original_codon))
+
+    return unrecoded_codons
+
+
+def generate_report(proteome_QC, unrecoded_restriction_sites, unrecoded_codons, recoded_sites_codons, filename):
+    
+    # Today's date
+    today = date.today()
+    
+    # Removing extension from filename
+    filename_without_ext = os.path.splitext(filename)[0]
+    
+    # File name for the report
+    report_filename = str(today)+"_"+str(filename_without_ext)+'_Recoding_Report.csv'
+
+    # Initialize the report string with title, date and overview
+    report = f"{filename_without_ext} Recoding Report\nDate: {today}\n\n"
+    
+    # Number of each codon and of each restriction site that were successfully recoded
+    num_recoded_codons = sum([1 for index, old_seq, new_seq in recoded_sites_codons if len(old_seq) == 3 and old_seq != new_seq])
+    num_recoded_sites = sum([1 for index, old_seq, new_seq in recoded_sites_codons if len(old_seq) != 3 and old_seq != new_seq])
+
+    report += f"Number of codons recoded: {num_recoded_codons}\n"
+    report += f"Number of restriction sites recoded: {num_recoded_sites}\n"
+    
+    # Overview of whether there are any mutations to the proteome and, if so, how many
+    num_mutations = len(proteome_QC)
+    report += f"Number of mutations to the proteome: {num_mutations}\n"
+
+    # Open the report file in write mode
+    with open(report_filename, 'w') as report_file:
+        # Write the initialized report string
+        report_file.write(report)
+        
+        # If there are mutations to the proteome, write the proteome_QC table to the report
+        if num_mutations > 0:
+            report_file.write("\nProteome mutations:\n")
+            proteome_QC.to_csv(report_file, sep=',',index=False)
+        
+        # Write the table of restriction sites that couldn't be recoded
+        report_file.write(f"\nUnrecoded restriction sites ({len(unrecoded_restriction_sites)}):\n")
+        unrecoded_restriction_sites_df = pd.DataFrame(unrecoded_restriction_sites, columns=['Index', 'Restriction Site'])
+        unrecoded_restriction_sites_df.to_csv(report_file, sep=',',index=False)
+
+        # Write the table of codons that couldn't be recoded
+        report_file.write(f"\nUnrecoded codons ({len(unrecoded_codons)}):\n")
+        unrecoded_codons_df = pd.DataFrame(unrecoded_codons, columns=['Index', 'Codon'])
+        unrecoded_codons_df.to_csv(report_file, sep=',',index=False)
+
+        # Write the table of all recoded restriction sites and codons
+        report_file.write("\nRecoded sites and codons:\n")
+        recoded_sites_codons_df = pd.DataFrame(recoded_sites_codons, columns=['Index', 'Old Sequence', 'New Sequence'])
+        recoded_sites_codons_df.to_csv(report_file, sep=',',index=False)
+        
+    print(f"Report written to {report_filename}")
+
+
 def main():
     parser = argparse.ArgumentParser(description='Recode a phage genome by removing specified codons and restriction sites via synonymous mutations.')
     parser.add_argument('-i','--input', type=str, required=True, help='Input GenBank file name. Specify as path name if input file is not in the same directory as recode_genome.py')
@@ -303,29 +406,46 @@ def main():
     record = SeqIO.read(args.input, "genbank")
     codon_usage = get_codon_usage(args.species)
     restriction_sites = args.re_sites if args.re_sites else []
-    overlaps = find_overlapping_regions(record)
 
 
-    if args.re_sites:
+    if args.re_sites and args.codons:
         record = recode_restriction_sites(record, restriction_sites)
-        proteome_QC = check_translations(args.input, record)
-
-    if args.codons:
         relative_usage = compute_relative_codon_usage(codon_usage, Bio.Data.CodonTable.standard_dna_table, args.codons)
         record = recode_codons(record, args.codons, restriction_sites, relative_usage)
-        proteome_QC = check_translations(args.input, record)
+        unrecoded_restriction_sites = find_unrecoded_restriction_sites(record, restriction_sites)
+        unrecoded_codons = find_unrecoded_codons(args.input, record, args.codons)
+    
+    elif args.re_sites:
+        record = recode_restriction_sites(record, restriction_sites)
+        unrecoded_restriction_sites = find_unrecoded_restriction_sites(record, restriction_sites)
+        unrecoded_codons = []
+    
+    elif args.codons:
+        relative_usage = compute_relative_codon_usage(codon_usage, Bio.Data.CodonTable.standard_dna_table, args.codons)
+        record = recode_codons(record, args.codons, restriction_sites, relative_usage)
+        unrecoded_restriction_sites = []
+        unrecoded_codons = find_unrecoded_codons(args.input, record, args.codons)
 
         
+    proteome_QC = check_translations(args.input, record)
+    
     write_to_genbank(record, args.output, args.codons, restriction_sites)
+    
 
     if proteome_QC:
-        print("Discrepancies found in the following locations:")
+        print("Proteome mutations found in the following locations:")
         for protein_name, mutation_info in proteome_QC.items():
             print(f"Protein: {protein_name}")
             for location, (old_aa, new_aa) in mutation_info.items():
                 print(f"Location: {location}, Old Amino Acid: {old_aa}, New Amino Acid: {new_aa}")
     else:
-        print("No discrepancies found.")
+        print("No mutations found in the proteome.")
+        
+    # Generate report after all processes are done
+    generate_report(proteome_QC, unrecoded_restriction_sites, unrecoded_codons, recoded_sites_codons, args.output)
+    print(len(unrecoded_codons))
+    print(len(unrecoded_restriction_sites))
+    print(unrecoded_restriction_sites)
 
 if __name__ == "__main__":
     main()
