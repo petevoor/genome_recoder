@@ -24,7 +24,7 @@ import os
 
 
 # Load the CUTG csv file into a DataFrame
-df = pd.read_csv('dbs/dna_codon_usage.csv')
+df = pd.read_csv('dbs/dna_codon_usage.csv', low_memory=False)
 
 recoded_sites_codons = []
 
@@ -443,9 +443,6 @@ def main():
         
     # Generate report after all processes are done
     generate_report(proteome_QC, unrecoded_restriction_sites, unrecoded_codons, recoded_sites_codons, args.output)
-    print(len(unrecoded_codons))
-    print(len(unrecoded_restriction_sites))
-    print(unrecoded_restriction_sites)
 
 if __name__ == "__main__":
     main()
