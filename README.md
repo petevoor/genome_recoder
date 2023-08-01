@@ -59,3 +59,11 @@ Or:
 - The codon usage bias for the specified species must be available on the Codon Usage Database.
 - The efficiency of recoding might vary based on the chosen host organism and the codon bias.
 - Recoding might introduce unintended changes to the proteome, and it is always recommended to check the recoding report and GenBank file after running the script.
+
+## References
+
+The codon usage database was adapted from:
+
+Hallee, L., Khomtchouk, B.B. Machine learning classifiers predict key genomic and evolutionary traits across the kingdoms of life. Sci Rep 13, 2088 (2023). https://doi.org/10.1038/s41598-023-28965-7
+
+and can be accessed here: https://archive.ics.uci.edu/dataset/577/codon+usage
